@@ -6,8 +6,88 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'user') {
     exit;
 }
 
-// ambil pesan chat
-$q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
+$user_id = $_SESSION['user_id'];
+
+// Handle upload barang
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['upload_barang'])) {
+    $nama_barang = mysqli_real_escape_string($conn, $_POST['nama_barang']);
+    $kategori = mysqli_real_escape_string($conn, $_POST['kategori']);
+    $deskripsi = mysqli_real_escape_string($conn, $_POST['deskripsi']);
+    $nilai_barang = mysqli_real_escape_string($conn, $_POST['nilai_barang']);
+    
+    // Handle file upload
+    $foto_barang = '';
+    if (isset($_FILES['foto_barang']) && $_FILES['foto_barang']['error'] == 0) {
+        $allowed = ['jpg', 'jpeg', 'png'];
+        $filename = $_FILES['foto_barang']['name'];
+        $filetype = pathinfo($filename, PATHINFO_EXTENSION);
+        $filesize = $_FILES['foto_barang']['size'];
+        
+        if (in_array(strtolower($filetype), $allowed) && $filesize <= 5242880) { // 5MB
+            $new_filename = uniqid() . '.' . $filetype;
+            $upload_path = '../uploads/' . $new_filename;
+            
+            // Create uploads directory if not exists
+            if (!file_exists('../uploads/')) {
+                mkdir('../uploads/', 0777, true);
+            }
+            
+            if (move_uploaded_file($_FILES['foto_barang']['tmp_name'], $upload_path)) {
+                $foto_barang = $new_filename;
+            }
+        }
+    }
+    
+    // Insert ke database dengan status default "Proses"
+    $tanggal = date('Y-m-d');
+    $status = 'Proses'; // Status default saat pertama kali input
+    
+    $query = "INSERT INTO gadai (user_id, nama_barang, kategori, deskripsi, nilai_barang, foto_barang, tanggal, status) 
+              VALUES ('$user_id', '$nama_barang', '$kategori', '$deskripsi', '$nilai_barang', '$foto_barang', '$tanggal', '$status')";
+    
+    if (mysqli_query($conn, $query)) {
+        $success_message = "Barang berhasil diajukan untuk digadaikan dengan status 'Proses'!";
+    } else {
+        $error_message = "Gagal mengajukan gadai: " . mysqli_error($conn);
+    }
+}
+
+// Ambil data barang user
+$query_barang = "SELECT * FROM gadai WHERE user_id = '$user_id' ORDER BY tanggal DESC";
+$result_barang = mysqli_query($conn, $query_barang);
+
+// Hitung statistik per status
+$total_barang = mysqli_num_rows($result_barang);
+$total_proses = 0;
+$total_aktif = 0;
+$total_selesai = 0;
+$total_nilai = 0;
+$pesan_baru = 0;
+
+while ($row = mysqli_fetch_assoc($result_barang)) {
+    if ($row['status'] == 'Proses') {
+        $total_proses++;
+    } elseif ($row['status'] == 'Aktif') {
+        $total_aktif++;
+        $total_nilai += $row['nilai_barang'];
+    } elseif ($row['status'] == 'Selesai') {
+        $total_selesai++;
+    }
+}
+
+// Reset pointer result
+mysqli_data_seek($result_barang, 0);
+
+// Ambil 3 barang terbaru untuk dashboard
+$query_recent = "SELECT * FROM gadai WHERE user_id = '$user_id' ORDER BY tanggal DESC LIMIT 3";
+$result_recent = mysqli_query($conn, $query_recent);
+
+// Simpan status barang untuk tracking perubahan
+$current_statuses = [];
+mysqli_data_seek($result_barang, 0);
+while ($row = mysqli_fetch_assoc($result_barang)) {
+    $current_statuses[$row['id']] = $row['status'];
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -98,9 +178,45 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
         .hover-scale:hover {
             transform: scale(1.05);
         }
+
+        .status-badge {
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .reload-notification {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 60;
+            animation: slideInRight 0.5s ease-out;
+        }
+
+        @keyframes slideInRight {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
     </style>
 </head>
 <body class="font-sans bg-gray-100">
+    <!-- Reload Notification (Hidden by default) -->
+    <div id="reload-notification" class="reload-notification hidden">
+        <div class="bg-blue-600 text-white px-6 py-4 rounded-lg shadow-lg flex items-center space-x-3">
+            <i data-lucide="refresh-cw" class="w-5 h-5 animate-spin"></i>
+            <span>Status barang berubah! Memuat ulang...</span>
+        </div>
+    </div>
+
     <!-- Navigation -->
     <nav class="bg-white shadow-lg sticky top-0 z-50">
         <div class="container mx-auto px-4">
@@ -141,7 +257,7 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                 </div>
                 
                 <nav class="space-y-2">
-                    <a href="#" class="flex items-center space-x-3 p-3 rounded-lg hover:bg-blue-700 transition-colors" 
+                    <a href="#" class="flex items-center space-x-3 p-3 rounded-lg bg-blue-700 transition-colors" 
                     onclick="showSection('dashboard-content', this); return false;">
                         <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
                         <span>Dashboard</span>
@@ -155,6 +271,9 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                     onclick="showSection('cek-barang', this); return false;">
                         <i data-lucide="package" class="w-5 h-5"></i>
                         <span>Cek Barang</span>
+                        <?php if ($total_proses > 0): ?>
+                        <span class="bg-yellow-500 text-white text-xs rounded-full px-2 py-1 ml-auto"><?php echo $total_proses; ?></span>
+                        <?php endif; ?>
                     </a>
                     <a href="#" class="flex items-center space-x-3 p-3 rounded-lg hover:bg-blue-700 transition-colors" 
                     onclick="logout(); return false;">
@@ -175,14 +294,29 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                     </button>
                 </div>
                 
+                <!-- Alert Messages -->
+                <?php if (isset($success_message)): ?>
+                <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4 flex items-center">
+                    <i data-lucide="check-circle" class="w-5 h-5 mr-2"></i>
+                    <span><?php echo $success_message; ?></span>
+                </div>
+                <?php endif; ?>
+                
+                <?php if (isset($error_message)): ?>
+                <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 flex items-center">
+                    <i data-lucide="alert-circle" class="w-5 h-5 mr-2"></i>
+                    <span><?php echo $error_message; ?></span>
+                </div>
+                <?php endif; ?>
+                
                 <!-- Dashboard Content -->
                 <div id="dashboard-content">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
                         <div class="bg-blue-50 p-5 rounded-xl fade-in">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <p class="text-blue-600">Barang Digadaikan</p>
-                                    <h3 class="text-2xl font-bold mt-1">5</h3>
+                                    <p class="text-blue-600">Total Barang</p>
+                                    <h3 class="text-2xl font-bold mt-1"><?php echo $total_barang; ?></h3>
                                 </div>
                                 <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
                                     <i data-lucide="package" class="w-6 h-6 text-blue-600"></i>
@@ -190,34 +324,48 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                             </div>
                         </div>
                         
-                        <div class="bg-green-50 p-5 rounded-xl fade-in" >
+                        <div class="bg-yellow-50 p-5 rounded-xl fade-in">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <p class="text-green-600">Dana Tersedia</p>
-                                    <h3 class="text-2xl font-bold mt-1">Rp 8.250.000</h3>
+                                    <p class="text-yellow-600">Proses</p>
+                                    <h3 class="text-2xl font-bold mt-1"><?php echo $total_proses; ?></h3>
                                 </div>
-                                <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-                                    <i data-lucide="dollar-sign" class="w-6 h-6 text-green-600"></i>
+                                <div class="w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
+                                    <i data-lucide="clock" class="w-6 h-6 text-yellow-600"></i>
                                 </div>
                             </div>
                         </div>
                         
-                        <div class="bg-purple-50 p-5 rounded-xl fade-in" >
+                        <div class="bg-green-50 p-5 rounded-xl fade-in">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <p class="text-purple-600">Pesan Baru</p>
-                                    <h3 class="text-2xl font-bold mt-1">3</h3>
+                                    <p class="text-green-600">Aktif</p>
+                                    <h3 class="text-2xl font-bold mt-1"><?php echo $total_aktif; ?></h3>
+                                    <p class="text-sm text-gray-600">Rp <?php echo number_format($total_nilai, 0, ',', '.'); ?></p>
+                                </div>
+                                <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
+                                    <i data-lucide="check-circle" class="w-6 h-6 text-green-600"></i>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-purple-50 p-5 rounded-xl fade-in">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-purple-600">Selesai</p>
+                                    <h3 class="text-2xl font-bold mt-1"><?php echo $total_selesai; ?></h3>
                                 </div>
                                 <div class="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-                                    <i data-lucide="message-square" class="w-6 h-6 text-purple-600"></i>
+                                    <i data-lucide="check-check" class="w-6 h-6 text-purple-600"></i>
                                 </div>
                             </div>
                         </div>
                     </div>
                     
-                    <div class="bg-white p-6 rounded-xl shadow-md slide-up" >
+                    <div class="bg-white p-6 rounded-xl shadow-md slide-up">
                         <h2 class="text-xl font-bold mb-4">Barang Terbaru</h2>
                         <div class="overflow-x-auto">
+                            <?php if (mysqli_num_rows($result_recent) > 0): ?>
                             <table class="w-full">
                                 <thead>
                                     <tr class="bg-gray-50">
@@ -228,26 +376,36 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr class="border-b">
-                                        <td class="p-3">iPhone 13 Pro</td>
-                                        <td class="p-3">12 Jun 2023</td>
-                                        <td class="p-3">Rp 7.500.000</td>
-                                        <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-1 rounded-full text-sm">Aktif</span></td>
+                                    <?php while ($row = mysqli_fetch_assoc($result_recent)): ?>
+                                    <tr class="border-b hover:bg-gray-50 transition-colors">
+                                        <td class="p-3"><?php echo htmlspecialchars($row['nama_barang']); ?></td>
+                                        <td class="p-3"><?php echo date('d M Y', strtotime($row['tanggal'])); ?></td>
+                                        <td class="p-3">Rp <?php echo number_format($row['nilai_barang'], 0, ',', '.'); ?></td>
+                                        <td class="p-3">
+                                            <?php 
+                                            $status_color = 'gray';
+                                            if ($row['status'] == 'Aktif') $status_color = 'green';
+                                            elseif ($row['status'] == 'Proses') $status_color = 'yellow';
+                                            elseif ($row['status'] == 'Selesai') $status_color = 'blue';
+                                            ?>
+                                            <span class="status-badge bg-<?php echo $status_color; ?>-100 text-<?php echo $status_color; ?>-800 px-3 py-1 rounded-full text-sm font-medium">
+                                                <?php echo $row['status']; ?>
+                                            </span>
+                                        </td>
                                     </tr>
-                                    <tr class="border-b">
-                                        <td class="p-3">Laptop ASUS ROG</td>
-                                        <td class="p-3">10 Jun 2023</td>
-                                        <td class="p-3">Rp 10.000.000</td>
-                                        <td class="p-3"><span class="bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full text-sm">Proses</span></td>
-                                    </tr>
-                                    <tr class="border-b">
-                                        <td class="p-3">Ring Emas 5gr</td>
-                                        <td class="p-3">5 Jun 2023</td>
-                                        <td class="p-3">Rp 5.200.000</td>
-                                        <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-1 rounded-full text-sm">Aktif</span></td>
-                                    </tr>
+                                    <?php endwhile; ?>
                                 </tbody>
                             </table>
+                            <?php else: ?>
+                            <div class="text-center py-12">
+                                <i data-lucide="package-x" class="w-16 h-16 text-gray-300 mx-auto mb-3"></i>
+                                <p class="text-gray-500 text-lg">Anda belum melakukan gadai apapun</p>
+                                <button onclick="showSection('upload-barang', document.querySelector('[onclick*=upload-barang]'))" 
+                                        class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                                    Upload Barang Sekarang
+                                </button>
+                            </div>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -256,46 +414,77 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                 <div id="upload-barang" class="hidden">
                     <h2 class="text-2xl font-bold mb-6">Upload Barang Gadai</h2>
                     
+                    <div class="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6">
+                        <div class="flex items-center">
+                            <i data-lucide="info" class="w-5 h-5 text-blue-600 mr-3"></i>
+                            <p class="text-blue-800">
+                                <strong>Informasi:</strong> Setelah Anda mengajukan barang, status akan menjadi "Proses" dan akan ditinjau oleh admin kami.
+                            </p>
+                        </div>
+                    </div>
+                    
                     <div class="bg-gray-50 p-6 rounded-xl mb-6 slide-up">
-                        <form class="space-y-6">
+                        <form method="POST" enctype="multipart/form-data" class="space-y-6" onsubmit="return validateForm()">
+                            <input type="hidden" name="upload_barang" value="1">
+                            
                             <div>
-                                <label class="block text-gray-700 font-medium mb-2">Nama Barang</label>
-                                <input type="text" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" placeholder="Masukkan nama barang">
+                                <label class="block text-gray-700 font-medium mb-2">Nama Barang *</label>
+                                <input type="text" name="nama_barang" id="nama_barang" required 
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" 
+                                       placeholder="Contoh: iPhone 13 Pro 128GB">
                             </div>
                             
                             <div>
-                                <label class="block text-gray-700 font-medium mb-2">Kategori Barang</label>
-                                <select class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all">
-                                    <option>Pilih kategori</option>
-                                    <option>Elektronik</option>
-                                    <option>Perhiasan</option>
-                                    <option>Kendaraan</option>
-                                    <option>Lainnya</option>
+                                <label class="block text-gray-700 font-medium mb-2">Kategori Barang *</label>
+                                <select name="kategori" id="kategori" required 
+                                        class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all">
+                                    <option value="">Pilih kategori</option>
+                                    <option value="Elektronik">Elektronik</option>
+                                    <option value="Perhiasan">Perhiasan</option>
+                                    <option value="Kendaraan">Kendaraan</option>
+                                    <option value="Lainnya">Lainnya</option>
                                 </select>
                             </div>
                             
                             <div>
-                                <label class="block text-gray-700 font-medium mb-2">Deskripsi Barang</label>
-                                <textarea class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" rows="3" placeholder="Deskripsikan kondisi dan spesifikasi barang"></textarea>
+                                <label class="block text-gray-700 font-medium mb-2">Deskripsi Barang *</label>
+                                <textarea name="deskripsi" id="deskripsi" required 
+                                          class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" 
+                                          rows="4" 
+                                          placeholder="Deskripsikan kondisi, spesifikasi, dan kelengkapan barang secara detail"></textarea>
+                                <p class="text-sm text-gray-500 mt-1">Semakin detail deskripsi, semakin cepat proses verifikasi</p>
                             </div>
                             
                             <div>
-                                <label class="block text-gray-700 font-medium mb-2">Perkiraan Nilai Barang (Rp)</label>
-                                <input type="number" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" placeholder="Masukkan perkiraan nilai">
+                                <label class="block text-gray-700 font-medium mb-2">Perkiraan Nilai Barang (Rp) *</label>
+                                <input type="number" name="nilai_barang" id="nilai_barang" required min="100000"
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" 
+                                       placeholder="Masukkan perkiraan nilai (minimal Rp 100.000)">
+                                <p class="text-sm text-gray-500 mt-1">Nilai ini akan diverifikasi oleh tim kami</p>
                             </div>
                             
                             <div>
                                 <label class="block text-gray-700 font-medium mb-2">Upload Foto Barang</label>
-                                <div class="upload-area border-dashed border-2 border-gray-300 rounded-lg p-8 text-center cursor-pointer">
-                                    <i data-lucide="upload-cloud" class="w-12 h-12 text-gray-400 mx-auto mb-3"></i>
-                                    <p class="text-gray-600">Klik untuk upload atau drop file di sini</p>
-                                    <p class="text-sm text-gray-500 mt-2">Format: JPG, PNG (Maks. 5MB)</p>
+                                <input type="file" name="foto_barang" id="foto_barang" accept="image/jpeg,image/jpg,image/png" 
+                                       class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                                       onchange="previewImage(event)">
+                                <p class="text-sm text-gray-500 mt-2">Format: JPG, PNG (Maks. 5MB)</p>
+                                <div id="image-preview" class="mt-4 hidden">
+                                    <img id="preview" class="max-w-xs rounded-lg shadow-md" alt="Preview">
                                 </div>
                             </div>
                             
-                            <button type="button" class="w-full bg-gradient-to-r from-blue-600 to-cyan-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-cyan-700 transition-all transform hover:scale-105">
-                                Ajukan Gadai
-                            </button>
+                            <div class="flex space-x-4">
+                                <button type="submit" 
+                                        class="flex-1 bg-gradient-to-r from-blue-600 to-cyan-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-cyan-700 transition-all transform hover:scale-105 flex items-center justify-center">
+                                    <i data-lucide="upload" class="w-5 h-5 mr-2"></i>
+                                    Ajukan Gadai
+                                </button>
+                                <button type="reset" 
+                                        class="px-6 py-3 border-2 border-gray-300 text-gray-700 rounded-lg font-semibold hover:bg-gray-100 transition-all">
+                                    Reset
+                                </button>
+                            </div>
                         </form>
                     </div>
                 </div>
@@ -307,118 +496,86 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                     <div class="bg-white rounded-xl shadow-md overflow-hidden mb-6 slide-up">
                         <div class="border-b">
                             <div class="flex overflow-x-auto">
-                                <button class="px-6 py-3 border-b-2 border-blue-600 text-blue-600 font-medium">Semua</button>
-                                <button class="px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium">Proses</button>
-                                <button class="px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium">Aktif</button>
-                                <button class="px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium">Selesai</button>
+                                <button class="filter-btn px-6 py-3 border-b-2 border-blue-600 text-blue-600 font-medium" data-status="all">
+                                    Semua (<?php echo $total_barang; ?>)
+                                </button>
+                                <button class="filter-btn px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-yellow-600 font-medium" data-status="Proses">
+                                    Proses (<?php echo $total_proses; ?>)
+                                </button>
+                                <button class="filter-btn px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-green-600 font-medium" data-status="Aktif">
+                                    Aktif (<?php echo $total_aktif; ?>)
+                                </button>
+                                <button class="filter-btn px-6 py-3 border-b-2 border-transparent text-gray-600 hover:text-blue-600 font-medium" data-status="Selesai">
+                                    Selesai (<?php echo $total_selesai; ?>)
+                                </button>
                             </div>
                         </div>
                         
                         <div class="p-6">
-                            <div class="flex items-center justify-between mb-6">
-                                <div class="flex items-center space-x-4">
-                                    <div class="w-16 h-16 bg-gray-200 rounded-lg flex items-center justify-center">
-                                        <i data-lucide="smartphone" class="w-8 h-8 text-gray-600"></i>
-                                    </div>
-                                    <div>
-                                        <h3 class="font-semibold">iPhone 13 Pro</h3>
-                                        <p class="text-gray-600">ID: TG-12345</p>
-                                    </div>
-                                </div>
-                                <div class="text-right">
-                                    <p class="text-gray-600">Nilai Gadai</p>
-                                    <p class="font-semibold text-lg">Rp 7.500.000</p>
-                                    <button class="bg-red-100 text-white-800 px-2 py-1 rounded-full text-sm" onclick="showSection('chat-user', this); return false;">Chat Admin</button>
-                                    <span class="bg-green-100 text-green-800 px-2 py-1 rounded-full text-sm">Aktif</span>
-                                </div>
-                            </div>
-                        <?php
-                            session_start();
-                            if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'user') {
-                                header("Location: index.php");
-                                exit;
-                            }
-                            include "db.php";
-
-                            $id = $_GET['id'];
-                            $user_id = $_SESSION['user_id'];
-
-                            $q = $conn->query("SELECT * FROM gadai WHERE id=$id AND user_id=$user_id");
-                            if ($q->num_rows == 0) {
-                                echo "Data tidak ditemukan.";
-                                exit;
-                            }
-                            $d = $q->fetch_assoc();
+                            <?php 
+                            mysqli_data_seek($result_barang, 0);
+                            if (mysqli_num_rows($result_barang) > 0): 
                             ?>
-                            <h1>Detail Barang Gadai</h1>
-                            <p><h3 class="font-semibold">Nama Barang:</h3> <?php echo $d['nama_barang']; ?></p>
-                            <p><b>Deskripsi:</b> <?php echo $d['deskripsi']; ?></p>
-                            <p><b>Kategori:</b> <?php echo $d['kategori']; ?></p>
-                            <p><b>Harga:</b> Rp <?php echo number_format($d['harga']); ?></p>
-                            <p><b>Lokasi:</b> <?php echo $d['lokasi']; ?></p>
-                            <p><b>Status:</b> <?php echo $d['status']; ?></p>
-
-                            <h3>Foto Barang</h3>
-                            <?php for ($i=1; $i<=5; $i++): ?>
-                                <?php if (!empty($d["foto$i"])): ?>
-                                    <img src="uploads/<?php echo $d["foto$i"]; ?>" width="200" style="margin:5px;">
-                                <?php endif; ?>
-                            <?php endfor; ?>
-
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Chat User Section (Initially Hidden) -->
-                <div id="chat-user" class="hidden">
-                    <h2 class="text-2xl font-bold mb-6">Chat dengan Admin</h2>
-                    
-                    <div class="bg-white rounded-xl shadow-md overflow-hidden slide-up">
-                        <div class="border-b p-4 bg-gray-50">
-                            <div class="flex items-center space-x-3">
-                                <div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                                    <i data-lucide="user" class="w-5 h-5 text-blue-600"></i>
-                                </div>
-                                <div>
-                                    <h3 class="font-semibold">Admin Trust Gadai</h3>
-                                    <p class="text-sm text-gray-600">Online</p>
-                                </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full">
+                                    <thead>
+                                        <tr class="bg-gray-50">
+                                            <th class="p-3 text-left">Foto</th>
+                                            <th class="p-3 text-left">Nama Barang</th>
+                                            <th class="p-3 text-left">Kategori</th>
+                                            <th class="p-3 text-left">Tanggal</th>
+                                            <th class="p-3 text-left">Nilai</th>
+                                            <th class="p-3 text-left">Status</th>
+                                            <th class="p-3 text-left">Aksi</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php while ($row = mysqli_fetch_assoc($result_barang)): ?>
+                                        <tr class="border-b item-row hover:bg-gray-50 transition-colors" data-status="<?php echo $row['status']; ?>" data-id="<?php echo $row['id']; ?>">
+                                            <td class="p-3">
+                                                <?php if (!empty($row['foto_barang'])): ?>
+                                                <img src="../uploads/<?php echo $row['foto_barang']; ?>" alt="Foto Barang" class="w-16 h-16 object-cover rounded-lg shadow-sm">
+                                                <?php else: ?>
+                                                <div class="w-16 h-16 bg-gray-200 rounded-lg flex items-center justify-center">
+                                                    <i data-lucide="image" class="w-8 h-8 text-gray-400"></i>
+                                                </div>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td class="p-3 font-medium"><?php echo htmlspecialchars($row['nama_barang']); ?></td>
+                                            <td class="p-3"><?php echo htmlspecialchars($row['kategori']); ?></td>
+                                            <td class="p-3"><?php echo date('d M Y', strtotime($row['tanggal'])); ?></td>
+                                            <td class="p-3 font-semibold">Rp <?php echo number_format($row['nilai_barang'], 0, ',', '.'); ?></td>
+                                            <td class="p-3">
+                                                <?php 
+                                                $status_color = 'gray';
+                                                if ($row['status'] == 'Aktif') $status_color = 'green';
+                                                elseif ($row['status'] == 'Proses') $status_color = 'yellow';
+                                                elseif ($row['status'] == 'Selesai') $status_color = 'blue';
+                                                ?>
+                                                <span class="status-badge bg-<?php echo $status_color; ?>-100 text-<?php echo $status_color; ?>-800 px-3 py-1 rounded-full text-sm font-medium">
+                                                    <?php echo $row['status']; ?>
+                                                </span>
+                                            </td>
+                                            <td class="p-3">
+                                                <button onclick="viewDetail(<?php echo $row['id']; ?>)" class="text-blue-600 hover:text-blue-800 transition-colors">
+                                                    <i data-lucide="eye" class="w-5 h-5"></i>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        <?php endwhile; ?>
+                                    </tbody>
+                                </table>
                             </div>
-                        </div>
-                        
-                        <div class="chat-container p-4 bg-gray-50 h-96">
-                            <div class="space-y-4">
-                                <?php while($c = $q->fetch_assoc()){ ?>
-                                    <?php if ($c['sender_role'] === 'user') { ?>
-                                        <!-- pesan user -->
-                                        <div class="flex justify-end">
-                                            <div class="chat-message bg-blue-100 p-4 rounded-xl rounded-tr-none shadow-sm">
-                                                <p><?php echo htmlspecialchars($c['message']); ?></p>
-                                                <span class="text-xs text-gray-500 mt-1 block"><?php echo $c['created_at']; ?></span>
-                                            </div>
-                                        </div>
-                                    <?php } else { ?>
-                                        <!-- pesan admin -->
-                                        <div class="flex justify-start">
-                                            <div class="chat-message bg-white p-4 rounded-xl rounded-tl-none shadow-sm">
-                                                <p><?php echo htmlspecialchars($c['message']); ?></p>
-                                                <span class="text-xs text-gray-500 mt-1 block"><?php echo $c['created_at']; ?></span>
-                                            </div>
-                                        </div>
-                                    <?php } ?>
-                                <?php } ?>
-                            </div>
-                        </div>
-                        
-                        <div class="border-t p-4 bg-white">
-                            <form method="post" action="chat.php" class="flex space-x-3">
-                                <input type="text" name="message" required
-                                    class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                                    placeholder="Ketik pesan...">
-                                <button type="submit" class="bg-blue-600 text-white px-4 rounded-lg hover:bg-blue-700 transition-colors">
-                                    <i data-lucide="send" class="w-5 h-5"></i>
+                            <?php else: ?>
+                            <div class="text-center py-12">
+                                <i data-lucide="package-x" class="w-16 h-16 text-gray-300 mx-auto mb-3"></i>
+                                <p class="text-gray-500 text-lg">Anda belum melakukan gadai apapun</p>
+                                <button onclick="showSection('upload-barang', document.querySelector('[onclick*=upload-barang]'))" 
+                                        class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                                    Upload Barang Sekarang
                                 </button>
-                            </form>
+                            </div>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -430,6 +587,9 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
     <div class="overlay" id="overlay"></div>
 
     <script>
+        // Store current statuses for change detection
+        const currentStatuses = <?php echo json_encode($current_statuses); ?>;
+        
         // Initialize Lucide icons
         lucide.createIcons();
         
@@ -448,13 +608,45 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
             overlay.classList.remove('active');
         });
         
+        // Check for status changes every 5 seconds
+        setInterval(checkStatusChanges, 5000);
+        
+        function checkStatusChanges() {
+            fetch('check_status.php')
+                .then(response => response.json())
+                .then(data => {
+                    let hasChanges = false;
+                    
+                    // Compare current statuses with new statuses
+                    for (let id in data) {
+                        if (currentStatuses[id] && currentStatuses[id] !== data[id]) {
+                            hasChanges = true;
+                            break;
+                        }
+                    }
+                    
+                    if (hasChanges) {
+                        showReloadNotification();
+                        setTimeout(() => {
+                            location.reload();
+                        }, 2000);
+                    }
+                })
+                .catch(error => console.log('Status check error:', error));
+        }
+        
+        function showReloadNotification() {
+            const notification = document.getElementById('reload-notification');
+            notification.classList.remove('hidden');
+            lucide.createIcons();
+        }
+        
         // Show different sections
         function showSection(sectionId, el) {
             // Hide all sections
             document.getElementById('dashboard-content').classList.add('hidden');
             document.getElementById('upload-barang').classList.add('hidden');
             document.getElementById('cek-barang').classList.add('hidden');
-            document.getElementById('chat-user').classList.add('hidden');
 
             // Show selected section
             document.getElementById(sectionId).classList.remove('hidden');
@@ -474,8 +666,103 @@ $q = $conn->query("SELECT * FROM chat ORDER BY created_at ASC");
                 sidebar.classList.remove('active');
                 overlay.classList.remove('active');
             }
+            
+            // Reinitialize icons
+            lucide.createIcons();
         }
 
+        // Filter functionality
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const status = this.getAttribute('data-status');
+                
+                // Update active button
+                document.querySelectorAll('.filter-btn').forEach(b => {
+                    b.classList.remove('border-blue-600', 'text-blue-600', 'border-yellow-600', 'text-yellow-600', 'border-green-600', 'text-green-600');
+                    b.classList.add('border-transparent', 'text-gray-600');
+                });
+                
+                // Set color based on status
+                if (status === 'Proses') {
+                    this.classList.add('border-yellow-600', 'text-yellow-600');
+                } else if (status === 'Aktif') {
+                    this.classList.add('border-green-600', 'text-green-600');
+                } else if (status === 'Selesai') {
+                    this.classList.add('border-blue-600', 'text-blue-600');
+                } else {
+                    this.classList.add('border-blue-600', 'text-blue-600');
+                }
+                
+                this.classList.remove('border-transparent', 'text-gray-600');
+                
+                // Filter items
+                document.querySelectorAll('.item-row').forEach(row => {
+                    if (status === 'all' || row.getAttribute('data-status') === status) {
+                        row.style.display = '';
+                    } else {
+                        row.style.display = 'none';
+                    }
+                });
+            });
+        });
+
+        // View detail function
+        function viewDetail(id) {
+            alert('Menampilkan detail barang ID: ' + id + '\n\nFitur detail akan segera tersedia.');
+            // Implement detail view logic here
+        }
+        
+        // Form validation
+        function validateForm() {
+            const nama = document.getElementById('nama_barang').value;
+            const kategori = document.getElementById('kategori').value;
+            const deskripsi = document.getElementById('deskripsi').value;
+            const nilai = document.getElementById('nilai_barang').value;
+            
+            if (!nama || !kategori || !deskripsi || !nilai) {
+                alert('Mohon lengkapi semua field yang wajib diisi (*)');
+                return false;
+            }
+            
+            if (parseInt(nilai) < 100000) {
+                alert('Nilai barang minimal Rp 100.000');
+                return false;
+            }
+            
+            if (confirm('Apakah Anda yakin ingin mengajukan barang ini untuk digadaikan?\n\nStatus awal akan menjadi "Proses" dan akan ditinjau oleh admin.')) {
+                return true;
+            }
+            
+            return false;
+        }
+        
+        // Preview image before upload
+        function previewImage(event) {
+            const file = event.target.files[0];
+            if (file) {
+                // Check file size (5MB = 5242880 bytes)
+                if (file.size > 5242880) {
+                    alert('Ukuran file terlalu besar! Maksimal 5MB');
+                    event.target.value = '';
+                    return;
+                }
+                
+                // Check file type
+                const validTypes = ['image/jpeg', 'image/jpg', 'image/png'];
+                if (!validTypes.includes(file.type)) {
+                    alert('Format file tidak valid! Gunakan JPG atau PNG');
+                    event.target.value = '';
+                    return;
+                }
+                
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    document.getElementById('preview').src = e.target.result;
+                    document.getElementById('image-preview').classList.remove('hidden');
+                }
+                reader.readAsDataURL(file);
+            }
+        }
         
         // Logout function
         function logout() {
